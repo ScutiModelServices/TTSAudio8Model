@@ -15,6 +15,7 @@ import logging
 import os
 import random
 import re
+import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -106,16 +107,17 @@ class Speaker:
 
 
 def load(model_id: str, revision: str, device: str, dtype: str) -> Speaker:
-    """Downloads (first time) and loads the model. Blocking: run it in a thread."""
+    """Loads the downloaded pinned model without network access. Blocking: run it in a thread."""
     import torch
     from transformers import AutoModel, AutoProcessor
+
+    processor = AutoProcessor.from_pretrained(model_id, revision=revision, local_files_only=True, trust_remote_code=True)
 
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise EngineError("The device is cuda but no GPU is visible here. Install a CUDA build of torch or set the device to cpu.", 503)
     if device == "cpu" and dtype != "float32":
         raise EngineError("CPU inference needs the float32 dtype", 503)
-    processor = AutoProcessor.from_pretrained(model_id, revision=revision, trust_remote_code=True)
-    model = AutoModel.from_pretrained(model_id, revision=revision, trust_remote_code=True, dtype=getattr(torch, dtype)).eval().to(device)
+    model = AutoModel.from_pretrained(model_id, revision=revision, local_files_only=True, trust_remote_code=True, dtype=getattr(torch, dtype)).eval().to(device)
     speaker = Speaker(processor, model, device)
     list(speaker.pieces(["Warm up."], None, 0, 0.8, 64, None))  # the first call costs seconds of GPU setup (measured: 12 s vs 8 s)
     return speaker
@@ -125,6 +127,14 @@ def _remote_sha(model_id: str, revision: str) -> str:
     from huggingface_hub import HfApi
 
     return HfApi().model_info(model_id, revision=revision, token=False).sha
+
+
+def _write_temp_clip(wav: bytes) -> Path:
+    """The one-call reference clip as a file the processor can read; the caller deletes it."""
+    handle, name = tempfile.mkstemp(prefix="audio8-ref-", suffix=".wav")
+    with os.fdopen(handle, "wb") as file:
+        file.write(wav)
+    return Path(name)
 
 
 def _cached_sha(model_id: str, revision: str) -> str | None:
@@ -144,7 +154,7 @@ def _download(model_id: str, revision: str) -> None:
 
 def default_marker() -> Path:
     """File in the shared models volume whose content changes when one replica downloads new weights."""
-    configured = os.environ.get("AUDIO8_WEIGHTS_MARKER")
+    configured = os.environ.get("SERVICE_WEIGHTS_MARKER")
     return Path(configured) if configured else Path(os.environ.get("HF_HOME") or "~/.cache/huggingface").expanduser() / ".audio8-weights-version"
 
 
@@ -199,7 +209,10 @@ class Audio8Engine:
     def _speaker(self) -> Speaker:
         with self._load_lock:
             if self._loaded is None:
-                self._loaded = self._loader(self.model, self.revision, self.device, self.dtype)
+                try:
+                    self._loaded = self._loader(self.model, self.revision, self.device, self.dtype)
+                except OSError:
+                    raise EngineError("Model weights are not downloaded. Ask an admin to press Download on the Updates card.", 503) from None
             return self._loaded
 
     def _reference(self, voice: str | None) -> tuple[str, tuple[Path, str] | None]:
@@ -211,26 +224,37 @@ class Audio8Engine:
             raise EngineError(f"Voice {name!r} is not served here; GET /v1/voices lists them", 404)
         return name, reference
 
-    async def synthesize(self, text: str, voice: str | None, seed: int | None, temperature: float) -> dict[str, Any]:
+    async def synthesize(self, text: str, voice: str | None, seed: int | None, temperature: float,
+                         clip: tuple[bytes, str] | None = None) -> dict[str, Any]:
         rate, parts, name = None, bytearray(), voice
-        async for rate, piece in self.stream(text, voice, seed, temperature):
+        async for rate, piece in self.stream(text, voice, seed, temperature, clip=clip):
             parts += piece
         return {"wav": wav_bytes(bytes(parts), rate), "seconds": len(parts) / 2 / rate, "voice": name or NO_REFERENCE}
 
     async def stream(self, text: str, voice: str | None, seed: int | None, temperature: float,
-                     pack: bool = True) -> AsyncIterator[tuple[int, bytes]]:
+                     pack: bool = True, clip: tuple[bytes, str] | None = None) -> AsyncIterator[tuple[int, bytes]]:
         """The audio as it is made: (sample rate, 16-bit mono PCM) per piece of text; `pack` False = one piece per
-        sentence. Holds the generation slot until the last piece, or until the caller closes the iterator."""
-        _, reference = self._reference(voice)
+        sentence. Holds the generation slot until the last piece, or until the caller closes the iterator.
+        `clip` = (WAV bytes, transcript) of a one-call reference voice: it is written to a temp file only while the
+        audio is made and deleted when the iterator ends, fails or is closed; it is never kept."""
+        _, reference = self._reference(None if clip else voice)
         texts = split_text(text, pack=pack)
         if not texts:
             raise EngineError("No speech could be made from that text.", 422)
         seed = random.getrandbits(62) if seed is None else seed
         async with self._gate:
             loaded = await asyncio.to_thread(self._speaker)
-            pieces = loaded.pieces(texts, reference, seed, temperature, self.max_new_tokens, self._threads)
-            while (piece := await asyncio.to_thread(next, pieces, None)) is not None:
-                yield loaded.rate, piece
+            temp: Path | None = None
+            try:
+                if clip:
+                    temp = await asyncio.to_thread(_write_temp_clip, clip[0])
+                    reference = (temp, clip[1])
+                pieces = loaded.pieces(texts, reference, seed, temperature, self.max_new_tokens, self._threads)
+                while (piece := await asyncio.to_thread(next, pieces, None)) is not None:
+                    yield loaded.rate, piece
+            finally:
+                if temp is not None:
+                    temp.unlink(missing_ok=True)
 
     # Updates: the Hub revision of the model files, shared by all replicas through one models volume.
 

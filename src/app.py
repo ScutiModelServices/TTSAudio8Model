@@ -30,7 +30,7 @@ from options import SETTINGS
 import settings
 from tokens import LatencyHistogram, TokenStore
 from updates import Updates
-from voices import MAX_WAV_BYTES, NAME
+from voices import MAX_WAV_BYTES, NAME, NO_REFERENCE, check_clip
 
 _log = logging.getLogger(__name__)
 
@@ -46,6 +46,9 @@ class SpeakRequest(BaseModel):
     seed: int | None = Field(None, ge=0, le=MAX_SEED)  # same text, voice, temperature and seed = same speech; only these calls are cached
     temperature: float = Field(0.8, ge=0.1, le=1.5)  # the upstream default; lower is steadier, higher more varied
     stream: bool = False  # true: the WAV is sent piece by piece, so audio starts sooner; its header has no length
+    # A reference voice for this call only (instead of `voice`): used while the audio is made, then deleted; never stored or cached.
+    reference_audio_base64: str | None = Field(None, min_length=1, max_length=MAX_WAV_BYTES * 4 // 3 + 64)  # a WAV clip, base64 or a data: URL (the Try it panel sends one)
+    reference_text: str | None = Field(None, min_length=1, max_length=2000)  # exactly what the clip says
 
 
 class VoiceUpload(BaseModel):
@@ -79,13 +82,13 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
                tokens: TokenStore | None = None, warm: bool = False,
                updates: Updates | None = None, check_hours: float = 0, max_inflight: int | None = None,
                cache_size: int | None = None, config: settings.Config | None = None) -> FastAPI:
-    """`admin_password` (AUDIO8_ADMIN_PASSWORD) unlocks /admin/, where each caller gets a token of its own; when it
+    """`admin_password` (SERVICE_ADMIN_PASSWORD) unlocks /admin/, where each caller gets a token of its own; when it
     is set, every call except /health must send one of those tokens in the X-Internal-Token header. Unset = no
-    auth at all (local use only). `tokens` holds the tokens (AUDIO8_TOKENS_FILE). `cache_size` > 0 keeps that
-    many answers per replica (AUDIO8_CACHE_SIZE). `config` (the admin page's settings) replaces `warm`,
+    auth at all (local use only). `tokens` holds the tokens (SERVICE_TOKENS_FILE). `cache_size` > 0 keeps that
+    many answers per replica (SERVICE_CACHE_SIZE). `config` (the admin page's settings) replaces `warm`,
     `check_hours`, `max_inflight` and `cache_size` and keeps them live; without it they stay fixed."""
-    tokens = tokens or TokenStore(os.environ.get("AUDIO8_TOKENS_FILE", "tokens.json"))
-    client = client or Audio8Engine(config.get("model_revision") if config else os.environ.get("AUDIO8_MODEL_REVISION", DEFAULT_REVISION),
+    tokens = tokens or TokenStore(os.environ.get("SERVICE_TOKENS_FILE", "tokens.json"))
+    client = client or Audio8Engine(config.get("model_revision") if config else os.environ.get("SERVICE_MODEL_REVISION", DEFAULT_REVISION),
                                     marker=default_marker())
     voices = client.store
     inflight = 0
@@ -94,12 +97,12 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
     def cache_limit() -> int:
         """Answers this replica keeps; 0 = off."""
         return config.get("cache_size") if config else (
-            cache_size if cache_size is not None else int(os.environ.get("AUDIO8_CACHE_SIZE") or 0))
+            cache_size if cache_size is not None else int(os.environ.get("SERVICE_CACHE_SIZE") or 0))
 
     def inflight_limit() -> int:
         """Calls this replica lets wait for the model at once; more get 429. 0 = 4."""
         value = config.get("max_inflight") if config else (
-            max_inflight if max_inflight is not None else int(os.environ.get("AUDIO8_MAX_INFLIGHT") or 0))
+            max_inflight if max_inflight is not None else int(os.environ.get("SERVICE_MAX_INFLIGHT") or 0))
         return value or 4
 
     updates = updates or Updates(client.model, cached_sha=lambda: client.cached_sha(), remote_sha=lambda: client.remote_sha(),
@@ -141,7 +144,7 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
         background: list[asyncio.Task] = []
         try:
             if config.get("warm") if config else warm:
-                # In the background: the first start downloads the voice, and /health must answer meanwhile.
+                # In the background: cached weights load while /health remains available.
                 background.append(asyncio.create_task(warm_up()))
             if config or check_hours > 0:
                 background.append(asyncio.create_task(check_forever()))
@@ -176,7 +179,7 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
 
     def admin(x_internal_token: str = Header("")) -> None:
         if not admin_password or not hmac.compare_digest(x_internal_token, admin_password):
-            raise HTTPException(401, "Admin password required (set AUDIO8_ADMIN_PASSWORD)")
+            raise HTTPException(401, "Admin password required (set SERVICE_ADMIN_PASSWORD)")
 
     app = FastAPI(title="Audio8 text-to-speech service", lifespan=lifespan)
 
@@ -203,21 +206,25 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
 
     @app.post("/v1/speak")
     async def speak(body: SpeakRequest, allowed: list[str] | None = Depends(authorize), _slot: None = Depends(slot)) -> Response:
-        name = body.voice or client.default_voice
-        check_scope(allowed, name)
+        clip = one_call_clip(body, allowed)
+        name = "custom" if clip else body.voice or client.default_voice
+        if not clip:
+            check_scope(allowed, name)
         started = time.perf_counter()
         size = cache_limit()
         seed = body.seed if body.seed is not None else secrets.randbelow(MAX_SEED + 1)
         key = (client.generation, name, body.temperature, seed, body.text)
-        audio = cache.get(key, size) if body.seed is not None else None
+        audio = cache.get(key, size) if body.seed is not None and not clip else None
         if audio is not None:
             return wav_reply(audio, started, "hit")
         # Without a seed the call can never repeat, so keeping its answer would only fill the cache.
-        keep = size if body.seed is not None else 0
+        # A one-call voice is never cached: nothing made from it stays on the server.
+        keep = size if body.seed is not None and not clip else 0
         try:
             if body.stream:
-                return await stream_reply(body, name, seed, key, keep)
-            audio = await client.synthesize(body.text, name, seed, body.temperature)
+                return await stream_reply(body, name, seed, key, keep, clip)
+            audio = await client.synthesize(body.text, None if clip else name, seed, body.temperature, clip=clip)
+            audio["voice"] = name
         except EngineError as error:
             raise HTTPException(error.status or 500, str(error)) from None
         except Exception:
@@ -227,15 +234,36 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
         cache.put(key, audio, keep)
         return wav_reply(audio, started, "miss")
 
+    def one_call_clip(body: SpeakRequest, allowed: list[str] | None) -> tuple[bytes, str] | None:
+        """The (WAV, transcript) of a one-call reference voice, or None. Needs both fields, no `voice`, and a token that
+        is not limited to certain voices (a limited token may only use the voices listed for it)."""
+        if body.reference_audio_base64 is None and body.reference_text is None:
+            return None
+        if body.reference_audio_base64 is None or body.reference_text is None:
+            raise HTTPException(422, "reference_audio_base64 and reference_text go together")
+        if body.voice not in (None, NO_REFERENCE):
+            raise HTTPException(422, "Send either voice or a one-call reference, not both")
+        if allowed is not None:
+            raise HTTPException(403, "This token is limited to certain voices and may not send its own reference")
+        try:
+            data = body.reference_audio_base64
+            data = data.partition(",")[2] if data.startswith("data:") else data
+            wav = base64.b64decode(data, validate=True)
+            check_clip(wav, body.reference_text)
+        except (binascii.Error, ValueError) as error:
+            raise HTTPException(422, str(error)) from None
+        return wav, body.reference_text.strip()
+
     def wav_reply(audio: dict[str, Any], started: float, cached: str) -> Response:
         return Response(audio["wav"], media_type="audio/wav", headers={
             "X-Audio-Seconds": f"{audio['seconds']:.3f}", "X-Voice": audio["voice"], "X-Seed": str(audio["seed"]), "X-Cache": cached,
             "X-Duration-Ms": str(round((time.perf_counter() - started) * 1000))})
 
-    async def stream_reply(body: SpeakRequest, name: str, seed: int, key: tuple, size: int) -> StreamingResponse:
+    async def stream_reply(body: SpeakRequest, name: str, seed: int, key: tuple, size: int,
+                           clip: tuple[bytes, str] | None = None) -> StreamingResponse:
         """Starts the audio before the text is finished. The first piece is made here, so an unknown voice or a
         failed model still gives a proper HTTP error; once the stream has begun an error can only cut it off."""
-        pieces = client.stream(body.text, name, seed, body.temperature, pack=False)  # a sentence at a time: the first audio comes sooner
+        pieces = client.stream(body.text, None if clip else name, seed, body.temperature, pack=False, clip=clip)  # a sentence at a time: the first audio comes sooner
         try:
             rate, first = await anext(pieces)
         except BaseException:
@@ -279,7 +307,7 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
 
     @app.put("/admin/threads", dependencies=[Depends(admin)])
     def set_threads(body: Threads) -> dict[str, Any]:
-        """Applies to this replica now and is saved; the other replicas apply it within a few seconds. It beats AUDIO8_NUM_THREAD.
+        """Applies to this replica now and is saved; the other replicas apply it within a few seconds. It beats SERVICE_NUM_THREAD.
         The GPU does the generation; the threads only serve what runs on the CPU (the reference clip, the CPU device)."""
         client.num_thread = body.num_thread
         settings.save(tokens.settings_path, num_thread=body.num_thread)
@@ -292,7 +320,7 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
             value = os.environ.get(name, "").strip()
             return int(value) if value.isdigit() else None
 
-        return {"replicas": number("AUDIO8_REPLICAS"), "parallel": 1}
+        return {"replicas": number("SERVICE_REPLICAS"), "parallel": 1}
 
     @app.get("/admin/updates", dependencies=[Depends(admin)])
     async def update_status() -> dict[str, Any]:
@@ -365,7 +393,7 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
             raise HTTPException(404, "No such token")
         return {"ok": True}
 
-    web = Path(os.environ.get("AUDIO8_WEB_DIR", Path(__file__).resolve().parents[1] / "web"))
+    web = Path(os.environ.get("SERVICE_WEB_DIR", Path(__file__).resolve().parents[1] / "web"))
     if web.is_dir():
         app.mount("/admin", StaticFiles(directory=web, html=True))
 
@@ -373,19 +401,38 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
 
 
 def main() -> None:
+    import sys
+
     import uvicorn
 
-    store = TokenStore(os.environ.get("AUDIO8_TOKENS_FILE", "tokens.json"))
+    if "--dotenv" in sys.argv[1:]:  # run.bat asks for it; a plain `python src/app.py` and Docker never read .env
+        env_file = Path(__file__).resolve().parents[1] / ".env"
+        if env_file.is_file():
+            names = settings.load_env_file(env_file)
+            print(f".env: loaded {', '.join(names) or 'no variables'} (names only; a real environment variable wins)", flush=True)
+        else:
+            print(".env: no file in the service folder", flush=True)
+    settings.apply_models_dir()  # SERVICE_MODELS_DIR -> HF_HOME / OLLAMA_MODELS
+
+    store = TokenStore(os.environ.get("SERVICE_TOKENS_FILE", "tokens.json"))
     config = settings.Config(store.settings_path, SETTINGS)
     client = Audio8Engine(config.get("model_revision"), config.get("device"), config.get("dtype"), config.get("max_new_tokens"),
                           marker=default_marker())
     saved = settings.load(store.settings_path)
-    threads = saved.get("num_thread") or os.environ.get("AUDIO8_NUM_THREAD", "").strip()
+    threads = saved.get("num_thread") or os.environ.get("SERVICE_NUM_THREAD", "").strip()
     if threads:
         client.num_thread = int(threads)
-    app = create_app(client=client, admin_password=os.environ.get("AUDIO8_ADMIN_PASSWORD") or None,
+    app = create_app(client=client, admin_password=os.environ.get("SERVICE_ADMIN_PASSWORD") or None,
                      tokens=store, config=config)
-    uvicorn.run(app, host=os.environ.get("AUDIO8_HOST", "127.0.0.1"), port=int(os.environ.get("AUDIO8_PORT", "9200")))
+    host, port = os.environ.get("SERVICE_HOST", "127.0.0.1"), int(os.environ.get("SERVICE_PORT", "29322"))
+
+    class Server(uvicorn.Server):
+        async def startup(self, sockets=None):
+            await super().startup(sockets)  # after uvicorn's own "running on" line
+            shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+            print(f"INFO:     Admin page: http://{shown}:{port}/admin/", flush=True)
+
+    Server(uvicorn.Config(app, host=host, port=port)).run()
 
 
 if __name__ == "__main__":

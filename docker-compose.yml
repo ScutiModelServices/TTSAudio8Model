@@ -2,25 +2,26 @@
 # on the GPU (the 0.6B model plus its codec, about 2.5 GB of weights; measure the memory with nvidia-smi); the downloaded
 # weights are shared through the models volume, the reference voices through the voices volume.
 # Needs an NVIDIA GPU and the NVIDIA Container Toolkit (Docker Desktop on Windows: WSL2 backend with GPU support).
-# Start:  docker compose up -d --build          (callers use http://<host>:9200)
-# Scale:  AUDIO8_REPLICAS=2 docker compose up -d --build, then: docker compose restart audio8_lb
+# Start:  docker compose up -d --build          (callers use http://<host>:29322)
+# Scale:  SERVICE_REPLICAS=2 docker compose up -d --build, then: docker compose restart tts_audio8_model_lb
 
-name: audio8
+name: tts_audio8_model
 
 services:
-  audio8:
+  tts_audio8_model:
     build: .
+    image: tts_audio8_model:latest
     restart: unless-stopped
     environment:
-      AUDIO8_ADMIN_PASSWORD: ${AUDIO8_ADMIN_PASSWORD:-}
-      AUDIO8_NUM_THREAD: ${AUDIO8_NUM_THREAD:-}
-      AUDIO8_REPLICAS: ${AUDIO8_REPLICAS:-1}  # shown read-only on /admin/
+      SERVICE_ADMIN_PASSWORD: ${SERVICE_ADMIN_PASSWORD:-}
+      SERVICE_NUM_THREAD: ${SERVICE_NUM_THREAD:-}
+      SERVICE_REPLICAS: ${SERVICE_REPLICAS:-1}  # shown read-only on /admin/
     volumes:
-      - models:/models
-      - voices:/voices
-      - tokens:/data
+      - tts_audio8_model_models:/models
+      - tts_audio8_model_voices:/voices
+      - tts_audio8_model_data:/data
     deploy:
-      replicas: ${AUDIO8_REPLICAS:-1}
+      replicas: ${SERVICE_REPLICAS:-1}
       resources:
         reservations:
           devices:
@@ -28,29 +29,39 @@ services:
               count: 1
               capabilities: [gpu]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9200/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:29322/health')"]
       interval: 15s
       timeout: 5s
       start_period: 300s
-    networks: [audio8]
+    networks: [tts_audio8_model]
 
-  audio8_lb:
+  tts_audio8_model_lb:
+    container_name: tts_audio8_model_lb
     image: nginx:1.27-alpine
     restart: unless-stopped
     ports:
-      - "${AUDIO8_PORT:-9200}:9200"
+      - "${SERVICE_PORT:-29322}:29322"
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
-      audio8:
+      tts_audio8_model:
         condition: service_healthy
-    networks: [audio8]
+    networks:
+      tts_audio8_model:
+      citadel:
+        aliases: [tts_audio8_model_lb]
 
 volumes:
-  models:
-  voices:
-  tokens:
-
+  tts_audio8_model_models:
+    name: tts_audio8_model_models
+  tts_audio8_model_voices:
+    name: tts_audio8_model_voices
+  tts_audio8_model_data:
+    name: tts_audio8_model_data
 networks:
-  # Other stacks reach http://audio8_lb:9200 by joining this network.
-  audio8:
+  # Other stacks reach http://tts_audio8_model_lb:29322 by joining this network.
+  tts_audio8_model:
+    name: tts_audio8_model
+  citadel:
+    name: citadel_core
+    external: true
