@@ -20,10 +20,14 @@ class FakeSpeaker:
 
     def __init__(self):
         self.calls = []
+        self.fail = False
 
     def pieces(self, texts, reference, seed, temperature, max_new_tokens, threads):
         self.calls.append({"texts": texts, "reference": reference, "seed": seed, "temperature": temperature,
-                           "max_new_tokens": max_new_tokens, "threads": threads})
+                           "max_new_tokens": max_new_tokens, "threads": threads,
+                           "reference_bytes": reference[0].read_bytes() if reference else None})  # read now: a one-call clip is deleted later
+        if self.fail:
+            raise RuntimeError("model crashed")
         for _ in texts:
             yield b"\1\0" * (self.rate // 10)
 

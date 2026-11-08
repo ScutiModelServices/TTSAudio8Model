@@ -15,6 +15,7 @@ import logging
 import os
 import random
 import re
+import tempfile
 import threading
 import uuid
 from pathlib import Path
@@ -128,6 +129,14 @@ def _remote_sha(model_id: str, revision: str) -> str:
     return HfApi().model_info(model_id, revision=revision, token=False).sha
 
 
+def _write_temp_clip(wav: bytes) -> Path:
+    """The one-call reference clip as a file the processor can read; the caller deletes it."""
+    handle, name = tempfile.mkstemp(prefix="audio8-ref-", suffix=".wav")
+    with os.fdopen(handle, "wb") as file:
+        file.write(wav)
+    return Path(name)
+
+
 def _cached_sha(model_id: str, revision: str) -> str | None:
     from huggingface_hub import snapshot_download
 
@@ -215,26 +224,37 @@ class Audio8Engine:
             raise EngineError(f"Voice {name!r} is not served here; GET /v1/voices lists them", 404)
         return name, reference
 
-    async def synthesize(self, text: str, voice: str | None, seed: int | None, temperature: float) -> dict[str, Any]:
+    async def synthesize(self, text: str, voice: str | None, seed: int | None, temperature: float,
+                         clip: tuple[bytes, str] | None = None) -> dict[str, Any]:
         rate, parts, name = None, bytearray(), voice
-        async for rate, piece in self.stream(text, voice, seed, temperature):
+        async for rate, piece in self.stream(text, voice, seed, temperature, clip=clip):
             parts += piece
         return {"wav": wav_bytes(bytes(parts), rate), "seconds": len(parts) / 2 / rate, "voice": name or NO_REFERENCE}
 
     async def stream(self, text: str, voice: str | None, seed: int | None, temperature: float,
-                     pack: bool = True) -> AsyncIterator[tuple[int, bytes]]:
+                     pack: bool = True, clip: tuple[bytes, str] | None = None) -> AsyncIterator[tuple[int, bytes]]:
         """The audio as it is made: (sample rate, 16-bit mono PCM) per piece of text; `pack` False = one piece per
-        sentence. Holds the generation slot until the last piece, or until the caller closes the iterator."""
-        _, reference = self._reference(voice)
+        sentence. Holds the generation slot until the last piece, or until the caller closes the iterator.
+        `clip` = (WAV bytes, transcript) of a one-call reference voice: it is written to a temp file only while the
+        audio is made and deleted when the iterator ends, fails or is closed; it is never kept."""
+        _, reference = self._reference(None if clip else voice)
         texts = split_text(text, pack=pack)
         if not texts:
             raise EngineError("No speech could be made from that text.", 422)
         seed = random.getrandbits(62) if seed is None else seed
         async with self._gate:
             loaded = await asyncio.to_thread(self._speaker)
-            pieces = loaded.pieces(texts, reference, seed, temperature, self.max_new_tokens, self._threads)
-            while (piece := await asyncio.to_thread(next, pieces, None)) is not None:
-                yield loaded.rate, piece
+            temp: Path | None = None
+            try:
+                if clip:
+                    temp = await asyncio.to_thread(_write_temp_clip, clip[0])
+                    reference = (temp, clip[1])
+                pieces = loaded.pieces(texts, reference, seed, temperature, self.max_new_tokens, self._threads)
+                while (piece := await asyncio.to_thread(next, pieces, None)) is not None:
+                    yield loaded.rate, piece
+            finally:
+                if temp is not None:
+                    temp.unlink(missing_ok=True)
 
     # Updates: the Hub revision of the model files, shared by all replicas through one models volume.
 

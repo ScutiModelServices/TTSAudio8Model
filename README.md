@@ -8,13 +8,15 @@ The model runs in this process on an **NVIDIA GPU** (torch, transformers). It ne
 
 | Call | Purpose |
 |---|---|
-| `POST /v1/speak` | `{"text", "voice", "seed", "temperature", "stream"}` returns a WAV file (`audio/wav`, 16-bit mono, the model's sample rate). Headers: `X-Audio-Seconds`, `X-Duration-Ms`, `X-Voice`, `X-Seed`, `X-Cache` (`hit` when the kept answer was sent). |
+| `POST /v1/speak` | `{"text", "voice", "seed", "temperature", "stream", "reference_audio_base64", "reference_text"}` returns a WAV file (`audio/wav`, 16-bit mono, the model's sample rate). Headers: `X-Audio-Seconds`, `X-Duration-Ms`, `X-Voice`, `X-Seed`, `X-Cache` (`hit` when the kept answer was sent). |
 | `GET /v1/voices` | `{"voices", "default"}`; with a token limited to voices, only those. |
 | `PUT /admin/voices/{name}` | Admin password. `{"audio_base64", "transcript"}`: a WAV clip (at most 10 MB) and exactly what it says. Adds or replaces a voice. |
 | `DELETE /admin/voices/{name}` | Admin password. Removes a voice. |
 | `GET /health` | `{"status": "ok", "model", "ready", "num_thread", "device", "voices"}`; `ready` is true once the model is loaded. No token needed. |
 
 `text` is 1 to 5000 characters. Other fields are refused with 422, so a caller asking for `mp3` finds out instead of getting WAV silently. The model works best on pieces of at most 150 characters, so the service splits longer text at sentence ends (and at spaces inside a very long sentence) and joins the audio.
+
+**One-call voice (nothing kept).** Instead of a stored `voice`, send `reference_audio_base64` (a WAV, up to 10 MB) and `reference_text` (exactly what it says). The clip is written to a temp file only while the speech is made and deleted when the call ends, fails or the client disconnects, streams included. It is never added to the voices volume, and the answer is never cached, even with a `seed`. `X-Voice` is `custom`. Both fields are required together; a `voice` other than `none` beside them gives 422, and a token limited to certain voices gets 403. The Try it panel does not send these fields yet.
 
 **Voices.** A voice is a reference clip and its transcript. `none` (the default when `voice` is left out) uses no reference: the model picks a voice itself, and it changes from call to call unless a `seed` is sent. A token's *projects* list on the admin page limits the voices it may use, and `none` must be in that list to allow calls without a voice. The upstream model has no language parameter: it reads the language from the text.
 
