@@ -217,6 +217,14 @@ def test_a_bad_one_call_reference_is_refused_before_any_work(temp_dir):
     assert len(engine.made[0].calls) == 1 and list(temp_dir.iterdir()) == []
 
 
+def test_a_one_call_reference_may_be_a_data_url_as_the_try_it_panel_sends(temp_dir):
+    engine = make_engine()
+    url = "data:audio/wav;base64," + ONE_CALL["reference_audio_base64"]
+    reply = client(engine).post("/v1/speak", json={**BODY, **ONE_CALL, "reference_audio_base64": url})
+    assert reply.status_code == 200 and engine.made[0].calls[0]["reference_bytes"] == WAV
+    assert list(temp_dir.iterdir()) == []
+
+
 def test_a_token_limited_to_voices_may_not_send_its_own_reference(tmp_path):
     c = client(make_engine(voices=["anna"]), admin_password="admin", tokens=TokenStore(tmp_path / "t.json"))
     limited = {"X-Internal-Token": c.post("/admin/tokens", json={"name": "p", "projects": ["anna"]}, headers=ADMIN).json()["token"]}
