@@ -1,12 +1,14 @@
 # TTS_Audio8_Model: Docker Desktop on this PC
 
+Before the first call, open `/admin/` → **Updates** → **Download**. Startup never downloads weights. The [admin guide](guide-web-ui.md#updates-and-first-download) includes the curl alternative.
+
 Run Audio8-TTS-Realistic-Air text to speech with voice cloning on an NVIDIA GPU (1.2 GiB loaded, 2.5 GiB peak) in Docker Desktop on the machine you work on, so other programs on it can call it.
 
 ## Requirements
 
 - Docker Desktop with Compose v2 (Windows: WSL2 backend).
 - An NVIDIA GPU with a current driver, and GPU support in Docker Desktop. Check it: `docker run --rm --gpus all nvidia/cuda:12.6.0-base-ubuntu24.04 nvidia-smi` must print your card.
-- Network access on the first start to download about 2.5 GB from Hugging Face into the `tts_audio8_model_models` volume.
+- Network access for explicit Downloads from the Updates card; startup and inference use downloaded files only.
 - GPU memory per replica: about 1.2 GiB loaded and up to 2.5 GiB while speaking long text (measured), so a 6 GB card holds one replica comfortably. The weights are about 2.5 GB on disk; the image is 17.6 GB.
 - This service does not belong on a box without a GPU (ZimaOS here). Run it on the GPU PC and let other machines call it over the LAN or Tailscale.
 
@@ -16,13 +18,13 @@ Run Audio8-TTS-Realistic-Air text to speech with voice cloning on an NVIDIA GPU 
    ```bash
    cp .env.example .env
    ```
-   Set `SERVICE_ADMIN_PASSWORD` (empty = no auth and no admin page, fine for a local test). Leave `SERVICE_PORT=29322`. Leave `SERVICE_REPLICAS=1`.
+   Set `SERVICE_ADMIN_PASSWORD` (required to download weights through the admin page). Leave `SERVICE_PORT=29322`. Leave `SERVICE_REPLICAS=1`.
 2. Start:
    ```bash
    docker compose up -d --build
    ```
-   The first start downloads about 2.5 GB of weights into the `tts_audio8_model_models` volume. `tts_audio8_model_lb` starts only after the service is healthy
-   (up to 300 s grace). Watch with `docker compose ps` and `docker compose logs -f tts_audio8_model`.
+   Startup loads downloaded weights only; open `/admin/`, then **Updates → Download** before the first call. `tts_audio8_model_lb` starts once `/health` answers; readiness may still be false
+   (300 s startup grace). Watch with `docker compose ps` and `docker compose logs -f tts_audio8_model`.
 3. Check:
    ```bash
    curl http://127.0.0.1:29322/health
@@ -76,11 +78,11 @@ python tools/bench.py http://127.0.0.1:29322 --save out
 | Symptom | Fix |
 |---|---|
 | `address already in use` on 29322 | Another copy (`run.bat`, or the same stack on another compose project) is running. Stop it or change `SERVICE_PORT`. |
-| `/health` shows `ready: false` for minutes | First start: the weights are downloading or loading. Check `docker compose logs -f tts_audio8_model`. |
+| `/health` shows `ready: false` for minutes | Download weights from the Updates card first; otherwise the service stays available with `ready: false`. Check `docker compose logs -f tts_audio8_model`. |
 | 401 Invalid token | The caller's token is missing or revoked; make one on `/admin/`. |
 | 503 `no GPU is visible here` | The container has no GPU. Enable GPU support in Docker Desktop and re-run the `nvidia-smi` check above. |
 | Container restarts in a loop | Out of GPU memory. Close other GPU programs. |
-| `tts_audio8_model_lb` never starts | No replica is healthy yet (first download, or out of memory). `docker compose logs tts_audio8_model`. |
+| `tts_audio8_model_lb` never starts | No replica is healthy yet (process failure or out of memory). `docker compose logs tts_audio8_model`. |
 | Replicas restart in a loop | Out of GPU memory. Lower `SERVICE_REPLICAS`, or check `docker compose logs tts_audio8_model` for `no GPU is visible`. |
 | 403 "may not use voice" | The token's list on `/admin/` does not include that voice (or `none`, when `voice` is left out). |
 | 404 on `/v1/speak` | The voice is not served here. `GET /v1/voices` lists them. |

@@ -1,5 +1,7 @@
 # Test it from the command line
 
+Before the first call, open `/admin/` → **Updates** → **Download**. Startup never downloads weights. The [admin guide](guide-web-ui.md#updates-and-first-download) includes the curl alternative.
+
 Calls Audio8 with PowerShell only, no admin page. Port 29322. Replace `<...>` values. The commands were written from the code and not yet run against a live server.
 
 ## Get a token

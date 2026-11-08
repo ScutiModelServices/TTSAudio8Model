@@ -106,16 +106,17 @@ class Speaker:
 
 
 def load(model_id: str, revision: str, device: str, dtype: str) -> Speaker:
-    """Downloads (first time) and loads the model. Blocking: run it in a thread."""
+    """Loads the downloaded pinned model without network access. Blocking: run it in a thread."""
     import torch
     from transformers import AutoModel, AutoProcessor
+
+    processor = AutoProcessor.from_pretrained(model_id, revision=revision, local_files_only=True, trust_remote_code=True)
 
     if device.startswith("cuda") and not torch.cuda.is_available():
         raise EngineError("The device is cuda but no GPU is visible here. Install a CUDA build of torch or set the device to cpu.", 503)
     if device == "cpu" and dtype != "float32":
         raise EngineError("CPU inference needs the float32 dtype", 503)
-    processor = AutoProcessor.from_pretrained(model_id, revision=revision, trust_remote_code=True)
-    model = AutoModel.from_pretrained(model_id, revision=revision, trust_remote_code=True, dtype=getattr(torch, dtype)).eval().to(device)
+    model = AutoModel.from_pretrained(model_id, revision=revision, local_files_only=True, trust_remote_code=True, dtype=getattr(torch, dtype)).eval().to(device)
     speaker = Speaker(processor, model, device)
     list(speaker.pieces(["Warm up."], None, 0, 0.8, 64, None))  # the first call costs seconds of GPU setup (measured: 12 s vs 8 s)
     return speaker
@@ -199,7 +200,10 @@ class Audio8Engine:
     def _speaker(self) -> Speaker:
         with self._load_lock:
             if self._loaded is None:
-                self._loaded = self._loader(self.model, self.revision, self.device, self.dtype)
+                try:
+                    self._loaded = self._loader(self.model, self.revision, self.device, self.dtype)
+                except OSError:
+                    raise EngineError("Model weights are not downloaded. Ask an admin to press Download on the Updates card.", 503) from None
             return self._loaded
 
     def _reference(self, voice: str | None) -> tuple[str, tuple[Path, str] | None]:

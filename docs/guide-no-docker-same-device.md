@@ -1,15 +1,17 @@
 # TTS_Audio8_Model: without Docker, on Windows
 
+Before the first call, open `/admin/` → **Updates** → **Download**. Startup never downloads weights. The [admin guide](guide-web-ui.md#updates-and-first-download) includes the curl alternative.
+
 Run Audio8-TTS-Realistic-Air text to speech with voice cloning on an NVIDIA GPU (1.2 GiB loaded, 2.5 GiB peak) directly with Python: one process, no load balancer, listening on `127.0.0.1:29322`.
 
 ## Requirements
 - Windows with Python 3.11 or newer and uv (`winget install astral-sh.uv`).
 - An NVIDIA GPU with a current driver. The `uv.lock` pins a CUDA build of torch, so no extra CUDA toolkit is needed.
-- Internet on the first start (about 2.5 GB of weights).
+- Internet only when an admin presses Download on the Updates card.
 
 ## Start
 Double-click `run.bat`, or run it in a terminal from `TTS_Audio8_Model\`. Choose **1 Run the service** in the menu, or run `run.bat run` to skip the menu. It runs `uv sync` to create or update `.venv`, then starts
-`python src/app.py`. The first start downloads about 2.5 GB of weights.
+`python src/app.py`. Startup loads downloaded weights only; open `/admin/`, then **Updates → Download** before the first call.
 
 Linux or macOS:
 ```bash

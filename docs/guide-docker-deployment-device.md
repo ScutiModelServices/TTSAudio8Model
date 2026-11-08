@@ -1,5 +1,7 @@
 # TTS_Audio8_Model: Docker on a deployment machine
 
+Before the first call, open `/admin/` → **Updates** → **Download**. Startup never downloads weights. The [admin guide](guide-web-ui.md#updates-and-first-download) includes the curl alternative.
+
 Run Audio8-TTS-Realistic-Air text to speech with voice cloning on an NVIDIA GPU (1.2 GiB loaded, 2.5 GiB peak) on a separate always-on machine (default `lex@scutiserver1.local`, folder
 `/media/ZimaOS-HD/Apps/TTS_Audio8_Model`). Callers reach it over the published port.
 
@@ -45,7 +47,7 @@ docker compose up -d --build
 docker compose ps
 curl http://127.0.0.1:29322/health
 ```
-The first start downloads about 2.5 GB of weights into the `tts_audio8_model_models` volume; `tts_audio8_model_lb` waits for a healthy service
+Startup loads downloaded weights only; open `/admin/`, then **Updates → Download** before the first call. `tts_audio8_model_lb` waits for `/health` to answer, even before weights are downloaded
 (up to 300 s grace).
 
 ## 4. Connect callers
