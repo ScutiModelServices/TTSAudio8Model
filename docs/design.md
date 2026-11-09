@@ -22,6 +22,6 @@ Loaded 1.2 GiB VRAM, peak 2.5 GiB; about 1.8 s of work per second of audio; same
 
 1. Listening quality of the output is unchecked (levels are sane: no clipping). `tests/` use a fake model.
 2. Playwright admin-UI test not run.
-3. No voice card on the admin page (that would change the shared `web/index.html` in every service); voices go through the API.
+3. The admin page has a voice card, switched on by the `voice-cloning` tag in `CONFIG.tags` of the shared `web/index.html`; services without the tag do not show it. `GET /admin/voices` feeds it.
 4. Reference clip length limits and audio quality advice are not stated upstream.
 5. No git repo or commit yet.

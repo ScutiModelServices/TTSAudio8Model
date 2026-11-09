@@ -28,7 +28,7 @@ The model runs in this process on an **NVIDIA GPU** (torch, transformers). It ne
 
 ## Admin page
 
-`/admin/` (password `SERVICE_ADMIN_PASSWORD`): tokens with voice scope, rate limit and expiry, usage numbers, CPU threads, the Settings card (update check hours, in-flight cap, answers kept, model revision, device, data type, token limit, load at start), and the Updates card. The page has no voice card yet; use the voice calls above (see `docs/guide-web-ui.md`). `/metrics` (admin password) is Prometheus text per token.
+`/admin/` (password `SERVICE_ADMIN_PASSWORD`): tokens with voice scope, rate limit and expiry, usage numbers, CPU threads, the Settings card (update check hours, in-flight cap, answers kept, model revision, device, data type, token limit, load at start), and the Updates card. The Cloned voices card adds, lists and deletes cloned voices (shown because the service has the `voice-cloning` tag); the voice calls above do the same (see `docs/guide-web-ui.md`). `/metrics` (admin password) is Prometheus text per token.
 
 ## Run
 
