@@ -21,7 +21,7 @@ Run Audio8-TTS-Realistic-Air text to speech with voice cloning on an NVIDIA GPU 
    Set `SERVICE_ADMIN_PASSWORD` (required to download weights through the admin page). Leave `SERVICE_PORT=29322`. Leave `SERVICE_REPLICAS=1`.
 2. Start:
    ```bash
-   docker compose up -d --build
+   docker compose --env-file .env.compose up -d --build
    ```
    Startup loads downloaded weights only; open `/admin/`, then **Updates → Download** before the first call. `tts_audio8_model_lb` starts once `/health` answers; readiness may still be false
    (300 s startup grace). Watch with `docker compose ps` and `docker compose logs -f tts_audio8_model`.
@@ -42,7 +42,7 @@ Run Audio8-TTS-Realistic-Air text to speech with voice cloning on an NVIDIA GPU 
 
 ## Settings
 
-In `.env` next to `docker-compose.yml`:
+In `.env.compose` next to `docker-compose.yml` (start with `docker compose --env-file .env.compose up -d --build`):
 
 | Variable | Default | Effect |
 |---|---|---|
@@ -62,7 +62,7 @@ add the variable under `environment:` of `tts_audio8_model` to use one as a star
 docker compose ps          # state
 docker compose logs -f tts_audio8_model
 docker compose down        # stop (the weights volume is kept)
-docker compose up -d --build && docker compose restart tts_audio8_model_lb   # after a code change
+docker compose --env-file .env.compose up -d --build && docker compose restart tts_audio8_model_lb   # after a code change
 ```
 
 ## Time it
