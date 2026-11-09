@@ -131,9 +131,16 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
             if saved.get("num_thread") and saved["num_thread"] != client.num_thread:
                 client.num_thread = int(saved["num_thread"])
             client.sync()
+            # A dropped model (download, threads change, sync) leaves /health "Starting" until a request loads it: reload once per drop.
+            if config.get("warm") and not client.ready and client.generation != warmed:
+                await warm_up()
             await asyncio.sleep(1)
 
+    warmed = 0  # generation of the last warm-up attempt
+
     async def warm_up() -> None:
+        nonlocal warmed
+        warmed = client.generation
         try:
             await client.warm()
         except Exception:
@@ -287,6 +294,12 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
                 cache.put(key, {"wav": wav_bytes(bytes(kept), rate), "seconds": len(kept) / 2 / rate, "voice": name, "seed": seed}, size)
 
         return StreamingResponse(chunks(), media_type="audio/wav", headers={"X-Voice": name, "X-Seed": str(seed), "X-Cache": "miss"})
+
+    @app.get("/admin/voices", dependencies=[Depends(admin)])
+    def admin_voices() -> dict[str, Any]:
+        """Every voice with its origin, for the admin page: cloned ones can be deleted, the others cannot."""
+        cloned = set(voices.names())
+        return {"voices": [{"name": name, "cloned": name in cloned} for name in client.voices], "default": client.default_voice}
 
     @app.put("/admin/voices/{name}", dependencies=[Depends(admin)])
     def put_voice(name: str, body: VoiceUpload) -> dict[str, Any]:
