@@ -148,8 +148,10 @@ def _cached_sha(model_id: str, revision: str) -> str | None:
 
 def _download(model_id: str, revision: str) -> None:
     from huggingface_hub import snapshot_download
+    from progress import hub_blobs, hub_total, tracking
 
-    snapshot_download(model_id, revision=revision, token=False)
+    with tracking(model_id, hub_total(model_id, revision), hub_blobs(model_id)):
+        snapshot_download(model_id, revision=revision, token=False)
 
 
 def default_marker() -> Path:
