@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
+from disconnect import CallerGone, Measure, first_piece
 from audio import AudioCache, wav_bytes, wav_header
 from engine import DEFAULT_REVISION, EngineError, Audio8Engine, default_marker
 from options import SETTINGS
@@ -212,7 +213,7 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
         return {"voices": names, "default": client.default_voice}
 
     @app.post("/v1/speak")
-    async def speak(body: SpeakRequest, allowed: list[str] | None = Depends(authorize), _slot: None = Depends(slot)) -> Response:
+    async def speak(body: SpeakRequest, request: Request, allowed: list[str] | None = Depends(authorize), _slot: None = Depends(slot)) -> Response:
         clip = one_call_clip(body, allowed)
         name = "custom" if clip else body.voice or client.default_voice
         if not clip:
@@ -229,7 +230,7 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
         keep = size if body.seed is not None and not clip else 0
         try:
             if body.stream:
-                return await stream_reply(body, name, seed, key, keep, clip)
+                return await stream_reply(request, body, name, seed, key, keep, clip)
             audio = await client.synthesize(body.text, None if clip else name, seed, body.temperature, clip=clip)
             audio["voice"] = name
         except EngineError as error:
@@ -266,13 +267,16 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
             "X-Audio-Seconds": f"{audio['seconds']:.3f}", "X-Voice": audio["voice"], "X-Seed": str(audio["seed"]), "X-Cache": cached,
             "X-Duration-Ms": str(round((time.perf_counter() - started) * 1000))})
 
-    async def stream_reply(body: SpeakRequest, name: str, seed: int, key: tuple, size: int,
-                           clip: tuple[bytes, str] | None = None) -> StreamingResponse:
+    async def stream_reply(request: Request, body: SpeakRequest, name: str, seed: int, key: tuple, size: int,
+                           clip: tuple[bytes, str] | None = None) -> Response:
         """Starts the audio before the text is finished. The first piece is made here, so an unknown voice or a
         failed model still gives a proper HTTP error; once the stream has begun an error can only cut it off."""
         pieces = client.stream(body.text, None if clip else name, seed, body.temperature, pack=False, clip=clip)  # a sentence at a time: the first audio comes sooner
         try:
-            rate, first = await anext(pieces)
+            rate, first = await first_piece(request, pieces)
+        except CallerGone:
+            await pieces.aclose()
+            return Response(status_code=499)  # nobody is listening; the generation is already stopped
         except BaseException:
             await pieces.aclose()
             raise
@@ -384,16 +388,8 @@ def create_app(client: Audio8Engine | None = None, admin_password: str | None = 
 
     latency = LatencyHistogram()
 
-    @app.middleware("http")
-    async def measure(request: Request, call_next):
-        started = time.perf_counter()
-        response = await call_next(request)
-        if request.url.path.startswith("/v1/"):
-            latency.observe(time.perf_counter() - started)
-        token_id = getattr(request.state, "token_id", None)
-        if token_id:
-            await run_in_threadpool(tokens.record, token_id, (time.perf_counter() - started) * 1000, response.status_code >= 500)
-        return response
+    app.add_middleware(Measure, observe=latency.observe,
+                       record=lambda token_id, ms, failed: run_in_threadpool(tokens.record, token_id, ms, failed))
 
     @app.get("/metrics", dependencies=[Depends(admin)])
     def metrics() -> PlainTextResponse:
